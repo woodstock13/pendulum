@@ -1,0 +1,38 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "Basic Express TypeScript API",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/master-server.ts",
+    "dev:master": "tsx watch src/master-server.ts",
+    "dev:instance": "tsx watch src/pendulum-server.ts",
+    "dev:old": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/master-server.js",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "node --import tsx --test src/simulation/pendulum-simulation.test.ts",
+    "test:watch": "node --import tsx --test --watch src/simulation/pendulum-simulation.test.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.46.3",
+    "@typescript-eslint/parser": "^8.46.3",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.4",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
