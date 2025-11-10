@@ -1,6 +1,7 @@
 # Pendulum Simulation Server - Technical Documentation
 
 ## Table of Contents
+
 1. [Overview](#overview)
 2. [System Architecture](#system-architecture)
 3. [Main Features](#main-features)
@@ -19,6 +20,7 @@
 The Pendulum Simulation Server is a **distributed multi-process physics simulation platform** built with Node.js, Express, and TypeScript. It implements a **master-worker architecture** to run up to 5 independent pendulum simulations simultaneously, with centralized collision detection and state aggregation.
 
 ### Key Technologies
+
 - **Runtime:** Node.js 20+
 - **Framework:** Express.js 5.1
 - **Language:** TypeScript 5.9 (strict mode)
@@ -26,6 +28,7 @@ The Pendulum Simulation Server is a **distributed multi-process physics simulati
 - **Physics:** Analytical mechanics (simple pendulum equation)
 
 ### Architecture Pattern
+
 ```
 Master Server (Port 3000)
     ├─ Orchestrates 5 child processes
@@ -38,6 +41,39 @@ Instance Servers (Ports 3001-3005)
     ├─ 60 FPS update loop (16.67ms timestep)
     └─ REST API for configuration & control
 ```
+
+## Main Features
+
+### ✅ Multi-Instance Management
+
+- **Concurrent Simulations:** Run up to 5 independent pendulum instances
+- **Process Isolation:** Each instance in separate Node.js process
+- **Dynamic Configuration:** Configure instances at runtime via REST API
+- **Health Monitoring:** Track status of all instances
+
+### ✅ Real-Time Collision Detection
+
+- **Automatic Detection:** Check all pendulum pairs every state poll
+- **Position-Based:** Uses 2D Cartesian coordinates
+- **Collision Response:** Auto-stops colliding pendulums
+- **Detailed Logging:** Console logs with coordinates and IDs
+- **Distance Formula:** `sqrt((x1-x2)² + (y1-y2)²) < 4cm`
+
+### ✅ Graceful Shutdown & Cleanup
+
+- **Signal Handling:** SIGTERM/SIGINT handlers for clean exit
+- **Cascade Shutdown:** Master → SIGTERM children → wait → SIGKILL fallback
+- **Orphaned Process Cleanup:** Detect and kill stale processes on startup using `lsof`
+- **Exit Safety:** Backup handler for abrupt terminations
+
+### ✅ State Aggregation
+
+- **Centralized State:** Master collects state from all instances
+- **Shared Metadata:** time, isRunning, isFinished synchronized
+- **Per-Pendulum Data:** angle, position, velocity for each
+- **Filtered Response:** Only return configured instances
+
+---
 
 ---
 
@@ -69,17 +105,30 @@ Instance Servers (Ports 3001-3005)
 │  │  • Track configured instances              │ │
 │  └───────────────────────────────────────────┘ │
 │  ┌───────────────────────────────────────────┐ │
-│  │  Collision Detection Layer                 │ │
-│  │  • O(n²) pair-wise distance checks        │ │
-│  │  • Auto-stop colliding pendulums          │ │
-│  │  • Log collision coordinates & IDs         │ │
+│  │  MQTT Coordination Layer (NEW)             │ │
+│  │  • Collision detection (O(n²) checks)     │ │
+│  │  • Pub/Sub collision stop/restart         │ │
+│  │  • ACK tracking & synchronization          │ │
+│  │  • 5-second collision pause coordination   │ │
 │  └───────────────────────────────────────────┘ │
 └──────────────┬────────┬────────┬────────┬──────┘
+               │        │        │        │
+               │   HTTP Requests │        │
+               ▼        ▼        ▼        ▼
+       ┌───────────────────────────────────────┐
+       │   MQTT Broker (localhost:1883)        │
+       │   Topics: pendulum/collision/*        │
+       │            pendulum/ack/*             │
+       └───────────────────────────────────────┘
+               ▲        ▲        ▲        ▲
+               │  MQTT Pub/Sub   │        │
                │        │        │        │
        ┌───────┴──┐ ┌───┴────┐ ┌┴────┐ ┌┴────┐
        │Instance#0│ │Instance│ │ ... │ │Inst │
        │Port:3001 │ │  #1    │ │     │ │ #4  │
-       │          │ │Port:3002│ │     │ │:3005│
+       │MQTT ID:  │ │Port:3002│ │     │ │:3005│
+       │pendulum-0│ │MQTT ID: │ │     │ │MQTT │
+       │          │ │pendulum-1│ │     │ │ID:4 │
        └──────────┘ └─────────┘ └─────┘ └─────┘
 ```
 
@@ -88,46 +137,356 @@ Instance Servers (Ports 3001-3005)
 ```
 server/
 ├── src/
-│   ├── master-server.ts           # Master orchestrator (290 lines)
-│   ├── pendulum-server.ts         # Instance server (200 lines)
-│   └── simulation/
-│       └── pendulum-simulation.ts # Physics engine (142 lines)
+│   ├── master/                    # Master server components
+│   │   ├── config.ts              # Master configuration
+│   │   ├── endpoints.ts           # Master API endpoints
+│   │   ├── mqtt.ts                # MQTT coordinator & collision detection
+│   │   ├── process-manager.ts     # Child process lifecycle management
+│   │   └── types.ts               # Master type definitions
+│   ├── pendulum/                  # Pendulum instance components
+│   │   ├── config.ts              # Instance configuration
+│   │   ├── endpoints.ts           # Instance API endpoints
+│   │   ├── mqtt.ts                # Instance MQTT message handler
+│   │   ├── simulation-manager.ts  # Instance simulation lifecycle
+│   │   └── types.ts               # Instance type definitions
+│   ├── simulation/                # Core physics engine
+│   │   └── pendulum-simulation.ts # Physics calculations
+│   ├── master-server.ts           # Master server entry point
+│   └── pendulum-server.ts         # Instance server entry point
 ├── package.json                   # Dependencies & scripts
 ├── tsconfig.json                  # TypeScript configuration
 └── example-config.json            # Sample configurations
 ```
 
+## API Reference
+
+### Master Server Endpoints (Port 3000)
+
+#### `GET /health`
+
+Health check for master server.
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "role": "master",
+  "port": 3000,
+  "instances": 5,
+  "maxInstances": 5,
+  "timestamp": "2025-01-09T12:34:56.789Z"
+}
+```
+
+#### `GET /state`
+
+Aggregate state from all configured instances.
+
+**Response:**
+
+```json
+{
+  "pendulums": [
+    {
+      "id": 0,
+      "pivotX": 10,
+      "angle": 0.654,
+      "angularVelocity": -0.123,
+      "length": 50
+    }
+  ],
+  "time": 2.5,
+  "isFinished": false,
+  "isRunning": true,
+  "collisionDetected": false
+}
+```
+
+#### `GET /instances`
+
+List all instance processes.
+
+**Response:**
+
+```json
+{
+  "instances": [
+    {
+      "id": 0,
+      "port": 3001,
+      "configured": true,
+      "isRunning": true,
+      "pid": 12345
+    }
+  ],
+  "count": 5
+}
+```
+
+#### `POST /configure/:id`
+
+Configure a specific instance.
+
+**Request Body:**
+
+```json
+{
+  "pivotX": 10,
+  "angle": 0.785,
+  "angularVelocity": 0,
+  "mass": 1.5,
+  "length": 50,
+  "gravity": 9.81
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "instanceId": 0
+}
+```
+
+#### `POST /control`
+
+Control all configured instances (start/stop).
+
+**Request Body:**
+
+```json
+{
+  "action": "start" // or "stop"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "action": "start",
+  "results": [
+    { "id": 0, "success": true },
+    { "id": 1, "success": true }
+  ]
+}
+```
+
+#### `POST /reset`
+
+Stop all simulations and clear configured state.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Stopped 2 simulation(s)",
+  "stoppedIds": [0, 1]
+}
+```
+
+### Instance Server Endpoints (Ports 3001-3005)
+
+#### `GET /health`
+
+Health check for instance.
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "instanceId": 0,
+  "port": 3001,
+  "configured": true,
+  "isRunning": true
+}
+```
+
+#### `GET /state`
+
+Get current simulation state.
+
+**Response:**
+
+```json
+{
+  "id": 0,
+  "pivotX": 10,
+  "angle": 0.654,
+  "angularVelocity": -0.123,
+  "length": 50,
+  "time": 2.5,
+  "isFinished": false,
+  "isRunning": true
+}
+```
+
+#### `POST /configure`
+
+Configure the pendulum simulation.
+
+**Request Body:** Same as master `/configure/:id`
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Pendulum configured",
+  "instanceId": 0
+}
+```
+
+#### `POST /start`
+
+Start the simulation loop.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Simulation started"
+}
+```
+
+#### `POST /stop`
+
+Stop the simulation loop.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Simulation stopped"
+}
+```
+
+#### `POST /reset`
+
+Reset simulation to initial state.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Simulation reset to initial state"
+}
+```
+
+---
+
 ### Core Components
 
-#### 1. Master Server (`master-server.ts`)
+The architecture is organized into three distinct modules:
+
+#### 1. Master Server Module (`master/`)
+
+**Process Manager (`master/process-manager.ts`)**
+
 **Responsibilities:**
-- Spawn 5 instance servers on startup
-- Route HTTP requests to appropriate instances
-- Aggregate state from all configured instances
-- Detect collisions between pendulums
-- Handle graceful shutdown and cleanup
+
+- Spawn 5 instance servers on startup using child processes
+- Track process state (PID, configured, running)
+- Forward HTTP requests to appropriate instances
+- Handle graceful shutdown with SIGTERM/SIGKILL
+- Cleanup orphaned processes from previous runs
 
 **Key Data Structures:**
+
 ```typescript
 interface PendulumProcess {
-  id: number;              // 0-4
-  port: number;            // 3001-3005
-  process: ChildProcess;   // Node.js child process handle
-  configured: boolean;     // Has /configure been called?
-  isRunning: boolean;      // Is simulation loop active?
+  id: number; // 0-4
+  port: number; // 3001-3005
+  process: ChildProcess; // Node.js child process handle
+  configured: boolean; // Has /configure been called?
+  isRunning: boolean; // Is simulation loop active?
 }
 
 const pendulumProcesses = new Map<number, PendulumProcess>();
 ```
 
-#### 2. Instance Server (`pendulum-server.ts`)
+**Key Functions:**
+
+- `spawnAllInstances()` - Spawn 5 instance processes
+- `forwardToInstance(id, endpoint, method, body?)` - HTTP request forwarding
+- `shutdownAllInstances()` - Graceful shutdown handler
+- `cleanupOrphanedProcesses()` - Kill stale processes on startup
+
+---
+
+**Master Endpoints (`master/endpoints.ts`)**
+
 **Responsibilities:**
-- Run a single pendulum simulation
-- Expose REST API for configuration & control
-- Execute physics timestep at 60 FPS
-- Report state on demand
+
+- Expose REST API for orchestration
+- Aggregate state from all configured instances
+- Coordinate start/stop/reset across instances
+- Trigger collision detection on state polls
+
+**Key Endpoints:**
+
+- `GET /health` - Master server status
+- `GET /state` - Aggregate state + collision detection
+- `GET /instances` - List all process information
+- `POST /configure/:id` - Configure specific instance
+- `POST /control` - Start/stop all configured instances
+- `POST /reset` - Stop all and clear configuration
+
+---
+
+**MQTT Coordinator (`master/mqtt.ts`)**
+
+**Responsibilities:**
+
+- Centralized collision detection
+- Coordinate collision stop-pause-restart protocol
+- Track acknowledgments from all instances
+- Publish collision commands via MQTT
+
+**Key Functions:**
+
+- `setupMqttCoordinator()` - Initialize MQTT client
+- `detectCollisions(pendulums)` - O(n²) collision detection
+- `handleInstanceAck(topic, message)` - Process ACKs
+- `publishCollisionStop()` - Broadcast stop command
+- `publishCollisionRestart()` - Broadcast restart after 5s pause
+
+**State Managed:**
+
+- `isCollisionInProgress` - Prevents concurrent collision handling
+- `stoppedInstances` - Set of instance IDs that stopped
+- `restartedInstances` - Set of instance IDs that restarted
+
+---
+
+#### 2. Pendulum Instance Module (`pendulum/`)
+
+**Simulation Manager (`pendulum/simulation-manager.ts`)**
+
+**Responsibilities:**
+
+- Manage single pendulum simulation lifecycle
+- Run physics update loop at 60 FPS
+- Expose control interface (configure, start, stop, reset, getState)
+- Track configured and running state
+
+**Key Features:**
+
+- Singleton pattern (one manager per instance process)
+- Uses `setInterval` for 60 FPS physics updates
+- Stops existing simulation before reconfiguring
+- Delegates physics calculations to `PendulumSimulation` class
 
 **Lifecycle States:**
+
 ```
 Created → Configured → Running → Stopped
    ↑          ↓          ↓         ↓
@@ -135,47 +494,65 @@ Created → Configured → Running → Stopped
               (can reconfigure)
 ```
 
-#### 3. Physics Simulation (`pendulum-simulation.ts`)
+---
+
+**Instance Endpoints (`pendulum/endpoints.ts`)**
+
 **Responsibilities:**
-- Model simple pendulum dynamics
-- Calculate 2D position from angle
-- Detect collisions with other pendulums
-- Track simulation progress
+
+- Expose REST API for single instance
+- Interface with simulation manager
+- Return state including 2D position
+- Handle configuration changes
+
+**Key Endpoints:**
+
+- `GET /health` - Instance status
+- `GET /state` - Current simulation state
+- `POST /configure` - Set physics parameters
+- `POST /start` - Start simulation loop
+- `POST /stop` - Stop simulation loop
+- `POST /reset` - Reset to initial conditions
 
 ---
 
-## Main Features
+**MQTT Handler (`pendulum/mqtt.ts`)**
 
-### ✅ Multi-Instance Management
-- **Concurrent Simulations:** Run up to 5 independent pendulum instances
-- **Process Isolation:** Each instance in separate Node.js process
-- **Dynamic Configuration:** Configure instances at runtime via REST API
-- **Health Monitoring:** Track status of all instances
+**Responsibilities:**
 
-### ✅ Real-Time Collision Detection
-- **Automatic Detection:** Check all pendulum pairs every state poll
-- **Position-Based:** Uses 2D Cartesian coordinates
-- **Collision Response:** Auto-stops colliding pendulums
-- **Detailed Logging:** Console logs with coordinates and IDs
-- **Distance Formula:** `sqrt((x1-x2)² + (y1-y2)²) < 4cm`
+- Subscribe to collision coordination messages
+- Respond to stop/restart commands
+- Publish acknowledgments to master
+- Delegate control to simulation manager
 
-### ✅ Graceful Shutdown & Cleanup
-- **Signal Handling:** SIGTERM/SIGINT handlers for clean exit
-- **Cascade Shutdown:** Master → SIGTERM children → wait → SIGKILL fallback
-- **Orphaned Process Cleanup:** Detect and kill stale processes on startup using `lsof`
-- **Exit Safety:** Backup handler for abrupt terminations
+**Key Features:**
 
-### ✅ State Aggregation
-- **Centralized State:** Master collects state from all instances
-- **Shared Metadata:** time, isRunning, isFinished synchronized
-- **Per-Pendulum Data:** angle, position, velocity for each
-- **Filtered Response:** Only return configured instances
+- Client ID: `pendulum-{INSTANCE_ID}`
+- Subscribes to `pendulum/collision/#`
+- Only responds if configured
+- Publishes ACKs to `pendulum/ack/stopped` and `pendulum/ack/restarted`
 
-### ✅ Flexible Configuration
-- **Physics Parameters:** Mass, length, gravity, initial angle
-- **Visual Properties:** Pivot position, color (UI-managed)
-- **Simulation Duration:** Configurable max time (default 60s)
-- **Runtime Updates:** Reconfigure without restarting server
+---
+
+#### 3. Simulation Engine Module (`simulation/`)
+
+**Pendulum Simulation (`simulation/pendulum-simulation.ts`)**
+
+**Responsibilities:**
+
+- Model simple pendulum dynamics using analytical mechanics
+- Calculate 2D position from angle using trigonometry
+- Provide pure, stateless physics calculations
+- Track simulation time and progress
+- Detect simulation completion (time >= maxTime)
+
+**Key Features:**
+
+- Pure class-based design (no side effects)
+- Euler integration for numerical solution
+- Small-angle approximation NOT used (works for large angles)
+- Energy-conserving (no damping)
+- 60 FPS update rate (dt = 0.016667s)
 
 ---
 
@@ -252,46 +629,119 @@ Response:
 }
 ```
 
-### State Polling & Collision Detection
+### State Polling & Collision Detection (with MQTT)
 
 ```
 Client Request:
 GET /state (every 100ms)
     │
     ▼
-┌──────────────────────────────────┐
-│ Master: Loop configured instances│
-└──────────┬───────────────────────┘
+┌────────────────────────────────────────┐
+│ Master Endpoints: GET /state           │
+│ Loop configured instances              │
+└──────────┬─────────────────────────────┘
            │
-           ├─→ GET http://localhost:3001/state
-           ├─→ GET http://localhost:3002/state
+           ├─→ HTTP: GET http://localhost:3001/state
+           ├─→ HTTP: GET http://localhost:3002/state
+           └─→ HTTP: ...
+           │
+           ▼
+┌────────────────────────────────────────┐
+│ Master: Aggregate responses            │
+│ pendulums = [{id, pivotX, angle,       │
+│              length, position}, ...]   │
+└──────────┬─────────────────────────────┘
+           │
+           ▼
+┌────────────────────────────────────────┐
+│ MQTT Coordinator: detectCollisions()   │
+│ For each pair (i, j):                  │
+│   pos1 = calculatePosition(p[i])       │
+│   pos2 = calculatePosition(p[j])       │
+│   distance = sqrt((x1-x2)² + (y1-y2)²) │
+│   If distance < 4cm:                   │
+│     • Set isCollisionInProgress=true   │
+│     • Log collision details            │
+│     • MQTT publish collision/stop      │
+│     • Wait for ACKs (blocking)         │
+│     • Wait 5 seconds                   │
+│     • MQTT publish collision/restart   │
+│     • Wait for ACKs (blocking)         │
+│     • HTTP POST /control (start)       │
+│     • Reset collision state            │
+└──────────┬─────────────────────────────┘
+           │
+           ▼
+           │
+  ┌────────┴────────┐
+  │ If collision:   │
+  │ MQTT Pub/Sub    │
+  └────────┬────────┘
+           │
+    ┌──────┴──────┐
+    │             │
+    ▼             ▼
+┌─────────────────────────────────────────┐
+│ MQTT Topic: pendulum/collision/stop     │
+│ All instances subscribe to this         │
+└─────────────────────────────────────────┘
+           │
+    ┌──────┴──────┬──────┬──────┐
+    │             │      │      │
+    ▼             ▼      ▼      ▼
+┌─────────┐ ┌─────────┐  ...  ┌─────────┐
+│Instance0│ │Instance1│        │Instance4│
+│ Stop    │ │ Stop    │        │ Stop    │
+│ Pub ACK │ │ Pub ACK │        │ Pub ACK │
+└─────────┘ └─────────┘        └─────────┘
+           │
+           ├─→ MQTT: pendulum/ack/stopped {instanceId: 0}
+           ├─→ MQTT: pendulum/ack/stopped {instanceId: 1}
            └─→ ...
            │
            ▼
-┌──────────────────────────────────┐
-│ Master: Aggregate responses      │
-│ pendulums = [{id, pivotX, angle, │
-│              length, ...}, ...]  │
-└──────────┬───────────────────────┘
+┌────────────────────────────────────────┐
+│ Master: Wait for all ACKs              │
+│ stoppedInstances.add(instanceId)       │
+│ When size === EXPECTED_INSTANCES:      │
+│   • Wait 5 seconds                     │
+│   • Publish collision/restart          │
+└────────────────────────────────────────┘
            │
            ▼
-┌──────────────────────────────────┐
-│ Master: detectCollisions()       │
-│ For each pair (i, j):            │
-│   Calculate positions            │
-│   Check distance < 4cm           │
-│   If collision:                  │
-│     • Log details                │
-│     • Stop both pendulums        │
-└──────────┬───────────────────────┘
+┌─────────────────────────────────────────┐
+│ MQTT Topic: pendulum/collision/restart  │
+└─────────────────────────────────────────┘
+           │
+    ┌──────┴──────┬──────┬──────┐
+    │             │      │      │
+    ▼             ▼      ▼      ▼
+┌─────────┐ ┌─────────┐  ...  ┌─────────┐
+│Instance0│ │Instance1│        │Instance4│
+│ Restart │ │ Restart │        │ Restart │
+│ Pub ACK │ │ Pub ACK │        │ Pub ACK │
+└─────────┘ └─────────┘        └─────────┘
+           │
+           ├─→ MQTT: pendulum/ack/restarted {instanceId: 0}
+           ├─→ MQTT: pendulum/ack/restarted {instanceId: 1}
+           └─→ ...
            │
            ▼
-Response:
+┌────────────────────────────────────────┐
+│ Master: Wait for all restart ACKs      │
+│ restartedInstances.add(instanceId)     │
+│ When size === EXPECTED_INSTANCES:      │
+│   • HTTP POST /control {action:start}  │
+│   • Reset isCollisionInProgress=false  │
+└────────────────────────────────────────┘
+           │
+           ▼
+Response to Client:
 {
   "pendulums": [...],
   "time": 2.5,
   "isRunning": true,
-  "collisionDetected": false
+  "collisionDetected": true  // or false
 }
 ```
 
@@ -358,242 +808,259 @@ Master responds to client
 UI renders at 60 FPS
 ```
 
-### Collision Detection Data Flow
+## MQTT Communication Architecture
 
-```
-Master GET /state endpoint
-    ↓
-Fetch state from all configured instances
-    ↓
-pendulums[] = [{id, pivotX, angle, length}, ...]
-    ↓
-detectCollisions(pendulums)
-    ↓
-For each pair (i, j):
-    ├─ pos1 = {x: pivotX1 + length1*sin(θ1), y: length1*(1-cos(θ1))}
-    ├─ pos2 = {x: pivotX2 + length2*sin(θ2), y: length2*(1-cos(θ2))}
-    ├─ distance = sqrt((x1-x2)² + (y1-y2)²)
-    └─ if distance < 4cm:
-           ├─ console.log(collision details)
-           ├─ POST /stop to instance i
-           ├─ POST /stop to instance j
-           └─ collisionDetected = true
-    ↓
-Return collisionDetected flag
-```
+The system uses **MQTT (Message Queuing Telemetry Transport)** as a publish-subscribe messaging protocol for coordinating collision detection and recovery across distributed pendulum instances.
 
-### Reset Data Flow
+### MQTT Broker Configuration
 
-```
-Client: POST /reset
-    ↓
-Master: Loop configured instances
-    ↓
-For each instance:
-    ├─ POST /stop to instance
-    ├─ pendulum.isRunning = false
-    └─ pendulum.configured = false  ← Clears for next session
-    ↓
-Response: {success, stoppedIds[]}
-```
+**Broker Details:**
 
----
+- **URL:** `mqtt://localhost:1883`
+- **Protocol:** MQTT v3.1.1
+- **Authentication:** None (localhost only)
+- **Deployment:** Local broker (Mosquitto recommended)
 
-## API Reference
+**Connection Pattern:**
 
-### Master Server Endpoints (Port 3000)
+- Master server connects as coordinator
+- Each instance connects with unique client ID: `pendulum-{INSTANCE_ID}`
+- Persistent connections maintained throughout lifecycle
 
-#### `GET /health`
-Health check for master server.
+### Topic Structure
 
-**Response:**
+The system uses a hierarchical topic structure for collision coordination:
+
+#### Master Publisher Topics
+
+- `pendulum/collision/stop` - Broadcast collision detection to all instances
+- `pendulum/collision/restart` - Signal instances to restart after collision pause
+
+#### Instance Publisher Topics
+
+- `pendulum/ack/stopped` - Acknowledge successful stop
+- `pendulum/ack/restarted` - Acknowledge successful restart
+
+#### Subscription Patterns
+
+- **Master subscribes to:** `pendulum/ack/#` (wildcard for all acknowledgments)
+- **Instances subscribe to:** `pendulum/collision/#` (wildcard for all collision commands)
+
+### Message Payloads
+
+#### Collision Stop Message
+
 ```json
 {
-  "status": "ok",
-  "role": "master",
-  "port": 3000,
-  "instances": 5,
-  "maxInstances": 5,
-  "timestamp": "2025-01-09T12:34:56.789Z"
+  "type": "stop",
+  "reason": "collision",
+  "timestamp": 1641234567890
 }
 ```
 
-#### `GET /state`
-Aggregate state from all configured instances.
+**QoS Level:** 1 (At least once delivery)
 
-**Response:**
+#### Collision Restart Message
+
 ```json
 {
-  "pendulums": [
-    {
-      "id": 0,
-      "pivotX": 10,
-      "angle": 0.654,
-      "angularVelocity": -0.123,
-      "length": 50
-    }
-  ],
-  "time": 2.5,
-  "isFinished": false,
-  "isRunning": true,
-  "collisionDetected": false
+  "type": "restart",
+  "timestamp": 1641234567890
 }
 ```
 
-#### `GET /instances`
-List all instance processes.
+**QoS Level:** 1 (At least once delivery)
 
-**Response:**
+#### Acknowledgment Messages
+
 ```json
 {
-  "instances": [
-    {
-      "id": 0,
-      "port": 3001,
-      "configured": true,
-      "isRunning": true,
-      "pid": 12345
-    }
-  ],
-  "count": 5
-}
-```
-
-#### `POST /configure/:id`
-Configure a specific instance.
-
-**Request Body:**
-```json
-{
-  "pivotX": 10,
-  "angle": 0.785,
-  "angularVelocity": 0,
-  "mass": 1.5,
-  "length": 50,
-  "gravity": 9.81
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "instanceId": 0
-}
-```
-
-#### `POST /control`
-Control all configured instances (start/stop).
-
-**Request Body:**
-```json
-{
-  "action": "start"  // or "stop"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "action": "start",
-  "results": [
-    {"id": 0, "success": true},
-    {"id": 1, "success": true}
-  ]
-}
-```
-
-#### `POST /reset`
-Stop all simulations and clear configured state.
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Stopped 2 simulation(s)",
-  "stoppedIds": [0, 1]
-}
-```
-
-### Instance Server Endpoints (Ports 3001-3005)
-
-#### `GET /health`
-Health check for instance.
-
-**Response:**
-```json
-{
-  "status": "ok",
   "instanceId": 0,
-  "port": 3001,
-  "configured": true,
-  "isRunning": true
+  "status": "stopped" // or "restarted"
 }
 ```
 
-#### `GET /state`
-Get current simulation state.
+**QoS Level:** 0 (Fire and forget - ACKs are tracked by count)
 
-**Response:**
-```json
-{
-  "id": 0,
-  "pivotX": 10,
-  "angle": 0.654,
-  "angularVelocity": -0.123,
-  "length": 50,
-  "time": 2.5,
-  "isFinished": false,
-  "isRunning": true
+### Collision Coordination Protocol
+
+The collision detection and recovery follows a **synchronized stop-pause-restart protocol**:
+
+#### Phase 1: Collision Detection (Master)
+
+1. Master polls `/state` from all configured instances
+2. Calculates pairwise distances between all pendulum bobs
+3. If any distance < 4cm:
+   - Sets `isCollisionInProgress = true`
+   - Publishes `stop` message to `pendulum/collision/stop`
+   - Initializes empty `stoppedInstances` Set
+   - Waits for all configured instances to ACK
+
+#### Phase 2: Instance Stop (Instances)
+
+1. Receive `stop` message on `pendulum/collision/stop`
+2. Stop simulation loop (if running)
+3. Publish ACK to `pendulum/ack/stopped` with instance ID
+4. Enter waiting state
+
+#### Phase 3: ACK Tracking (Master)
+
+1. Master receives ACK on `pendulum/ack/stopped`
+2. Adds instance ID to `stoppedInstances` Set
+3. When `stoppedInstances.size === EXPECTED_INSTANCES`:
+   - All instances have stopped
+   - Proceed to pause phase
+
+#### Phase 4: Collision Pause (Master)
+
+1. Wait exactly **5 seconds** (configurable delay)
+2. Allows collision to be visually observed
+3. Clears `stoppedInstances` Set
+4. Initializes `restartedInstances` Set
+
+#### Phase 5: Restart Broadcast (Master)
+
+1. Publishes `restart` message to `pendulum/collision/restart`
+2. Waits for all instances to ACK restart
+
+#### Phase 6: Instance Restart (Instances)
+
+1. Receive `restart` message on `pendulum/collision/restart`
+2. Restart simulation loop (if configured)
+3. Publish ACK to `pendulum/ack/restarted` with instance ID
+
+#### Phase 7: Resume Control (Master)
+
+1. Master receives ACK on `pendulum/ack/restarted`
+2. Adds instance ID to `restartedInstances` Set
+3. When `restartedInstances.size === EXPECTED_INSTANCES`:
+   - All instances have restarted
+   - Call master's `/control` endpoint with `action: "start"`
+   - Reset `isCollisionInProgress = false`
+   - Clear both ACK Sets
+
+### ACK Tracking Mechanism
+
+**Why ACK Tracking:**
+
+- Ensures all instances respond before proceeding
+- Prevents race conditions in distributed stop/start
+- Guarantees synchronized collision recovery
+
+**Implementation:**
+
+```typescript
+const stoppedInstances = new Set<number>();
+const restartedInstances = new Set<number>();
+
+// When ACK received:
+stoppedInstances.add(instanceId);
+
+// Check if all instances responded:
+if (stoppedInstances.size === EXPECTED_INSTANCES) {
+  // All instances stopped - proceed to next phase
 }
 ```
 
-#### `POST /configure`
-Configure the pendulum simulation.
+**Edge Cases Handled:**
 
-**Request Body:** Same as master `/configure/:id`
+- Duplicate ACKs (Set prevents double-counting)
+- Unconfigured instances (don't send ACKs)
+- Out-of-order ACKs (Set tracks by ID, not order)
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Pendulum configured",
-  "instanceId": 0
+### MQTT Component Responsibilities
+
+#### Master MQTT Coordinator (`master/mqtt.ts`)
+
+**Role:** Central collision detection and recovery orchestration
+
+**Key Functions:**
+
+- `setupMqttCoordinator()` - Initialize MQTT connection and subscriptions
+- `detectCollisions(pendulums)` - Calculate distances and trigger stop
+- `handleInstanceAck(topic, message)` - Process ACKs and coordinate phases
+- `publishCollisionStop()` - Broadcast stop command
+- `publishCollisionRestart()` - Broadcast restart command after pause
+
+**State Managed:**
+
+- `isCollisionInProgress` - Prevents overlapping collision handling
+- `stoppedInstances` - Tracks which instances stopped
+- `restartedInstances` - Tracks which instances restarted
+
+**Dependencies:**
+
+- Requires MQTT broker running on localhost:1883
+- Integrates with master's `/control` endpoint for final resume
+
+#### Instance MQTT Handler (`pendulum/mqtt.ts`)
+
+**Role:** Respond to collision coordination commands
+
+**Key Functions:**
+
+- `setupMqttHandler(instanceId)` - Initialize instance MQTT connection
+- `handleCollisionMessage(topic, message)` - Process stop/restart commands
+- `publishAck(status, instanceId)` - Send acknowledgments to master
+
+**Behavior:**
+
+- Only responds if instance is configured
+- Restart only occurs if instance was stopped (prevents double-start)
+- Always publishes ACK to maintain master's count
+- Delegates simulation control to `simulationManager`
+
+**Client ID Pattern:** `pendulum-{INSTANCE_ID}` (e.g., `pendulum-0`, `pendulum-1`)
+
+### QoS (Quality of Service) Levels
+
+**QoS 1 for Critical Messages:**
+
+- `pendulum/collision/stop` - Must be received by all instances
+- `pendulum/collision/restart` - Must be received by all instances
+- Guarantees at-least-once delivery
+- Broker stores message until acknowledged
+
+**QoS 0 for Acknowledgments:**
+
+- `pendulum/ack/stopped` - Fire and forget
+- `pendulum/ack/restarted` - Fire and forget
+- Lower overhead for high-frequency messages
+- Master tracks by count, not individual delivery
+
+### Collision Detection Algorithm
+
+```typescript
+const COLLISION_RADIUS = 2; // cm (per bob)
+const MIN_COLLISION_DISTANCE = 4; // 2 × radius
+
+for (let i = 0; i < pendulums.length; i++) {
+  for (let j = i + 1; j < pendulums.length; j++) {
+    const pos1 = calculatePosition(pendulums[i]);
+    const pos2 = calculatePosition(pendulums[j]);
+
+    const dx = pos1.x - pos2.x;
+    const dy = pos1.y - pos2.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance < MIN_COLLISION_DISTANCE) {
+      console.log(`🔴 COLLISION DETECTED`);
+      console.log(`  Pendulum ${pendulums[i].id} vs ${pendulums[j].id}`);
+      console.log(`  Distance: ${distance.toFixed(2)}cm`);
+
+      // Trigger MQTT stop sequence
+      publishCollisionStop();
+      return true; // collisionDetected
+    }
+  }
 }
 ```
 
-#### `POST /start`
-Start the simulation loop.
+**Position Calculation:**
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Simulation started"
-}
-```
-
-#### `POST /stop`
-Stop the simulation loop.
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Simulation stopped"
-}
-```
-
-#### `POST /reset`
-Reset simulation to initial state.
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Simulation reset to initial state"
-}
+```typescript
+const x = pivotX + length * Math.sin(angle);
+const y = length * (1 - Math.cos(angle));
 ```
 
 ---
@@ -615,358 +1082,52 @@ Where:
   L   = pendulum length (cm)
 ```
 
-### Numerical Integration (Euler Method)
-
-```typescript
-const dt = 0.016667;  // 60 FPS timestep
-
-// 1. Calculate acceleration
-const acceleration = -(gravity * 100 / length) * Math.sin(angle);
-
-// 2. Update velocity
-angularVelocity += acceleration * dt;
-
-// 3. Update angle
-angle += angularVelocity * dt;
-
-// 4. Increment time
-time += dt;
-```
-
-### 2D Position Calculation
-
-Bob position in Cartesian coordinates:
-
-```typescript
-const x = pivotX + length * Math.sin(angle);
-const y = length * (1 - Math.cos(angle));
-```
-
-**Geometry:**
-- Pivot at `(pivotX, 0)`
-- Angle `θ` measured from vertical (downward = 0)
-- Positive angle → clockwise rotation
-- Position calculated using trigonometry
-
-### Collision Detection Algorithm
-
-```typescript
-const COLLISION_RADIUS = 2;  // cm per bob
-const MIN_COLLISION_DISTANCE = 4;  // 2 × radius
-
-// For each pair of pendulums:
-const dx = pos1.x - pos2.x;
-const dy = pos1.y - pos2.y;
-const distance = Math.sqrt(dx * dx + dy * dy);
-
-if (distance < MIN_COLLISION_DISTANCE) {
-  // Collision detected!
-  console.log(`🔴 COLLISION: Pendulum ${id1} vs ${id2}`);
-  console.log(`  Position 1: (${pos1.x.toFixed(2)}, ${pos1.y.toFixed(2)})`);
-  console.log(`  Position 2: (${pos2.x.toFixed(2)}, ${pos2.y.toFixed(2)})`);
-  console.log(`  Distance: ${distance.toFixed(2)}cm`);
-
-  // Stop both pendulums
-  await forwardToInstance(id1, '/stop', 'POST');
-  await forwardToInstance(id2, '/stop', 'POST');
-}
-```
-
-### Physics Assumptions & Limitations
-
-**Assumptions:**
-- Point mass bob (no radius consideration in physics)
-- Massless, rigid string
-- No air resistance
-- No friction at pivot
-- Single degree of freedom
-- Energy conservation (no damping)
-
-**Limitations:**
-- Not suitable for large angles (small angle approximation not used)
-- No chaotic behavior modeling (double pendulum)
-- Collision response is instantaneous stop (non-physical)
-- No momentum transfer during collision
-
----
-
-## Design Decisions
-
-### Why Master-Worker Architecture?
-
-**Pros:**
-- ✅ **True Parallelism:** Each instance runs in separate process
-- ✅ **Process Isolation:** Crash in one instance doesn't affect others
-- ✅ **Scalability:** Easy to distribute across machines
-- ✅ **Resource Management:** OS-level scheduling and memory isolation
-
-**Cons:**
-- ❌ **Overhead:** Process spawning and IPC communication
-- ❌ **Complexity:** More code for process management
-- ❌ **State Synchronization:** Master must aggregate state
-
-**Alternative Considered:** Single-process with multiple simulations
-- Rejected because: No true parallelism, shared memory vulnerabilities
-
-### Why Polling Instead of WebSockets?
-
-**Current:** HTTP polling every 100ms
-
-**Pros:**
-- ✅ **Simplicity:** Standard REST API, no special protocols
-- ✅ **Stateless:** No connection management needed
-- ✅ **Compatible:** Works with any HTTP client
-
-**Cons:**
-- ❌ **Latency:** 100ms delay between updates
-- ❌ **Overhead:** More HTTP requests
-
-**Future Enhancement:** WebSocket support for real-time push updates
-
-### Why Centralized Collision Detection?
-
 **Current:** Master calculates collisions on `/state` requests
 
 **Pros:**
+
 - ✅ **Single Source of Truth:** One component responsible
-- ✅ **Simple Implementation:** No inter-instance communication
+- ✅ **Simple Implementation:** No inter-instance communication needed for detection
 - ✅ **Easy Debugging:** All collision logic in one place
+- ✅ **Global View:** Master has complete pendulum positions in one place
 
 **Cons:**
+
 - ❌ **Bottleneck:** Master must fetch all states before detecting
 - ❌ **Latency:** Detection only happens during polling
+- ❌ **O(n²) Complexity:** Doesn't scale beyond small number of instances
 
 **Alternative Considered:** Distributed detection at instance level
-- Rejected because: Requires complex state sharing between instances
 
-### Why TypeScript?
-
-**Pros:**
-- ✅ **Type Safety:** Catch errors at compile time
-- ✅ **IDE Support:** Better autocomplete and refactoring
-- ✅ **Documentation:** Interfaces serve as documentation
-- ✅ **Maintainability:** Easier to understand complex data structures
-
-**Cons:**
-- ❌ **Build Step:** Requires compilation (mitigated by `tsx`)
-- ❌ **Learning Curve:** Team must know TypeScript
-
-### Why Express.js?
-
-**Pros:**
-- ✅ **Mature Ecosystem:** Well-tested, extensive middleware
-- ✅ **Simplicity:** Minimal boilerplate for REST APIs
-- ✅ **Performance:** Fast enough for this use case
-- ✅ **Familiarity:** Widely adopted in Node.js community
-
-**Cons:**
-- ❌ **Not Modern:** Alternatives like Fastify are faster
-- ❌ **Callback-Heavy:** Less ergonomic than async/await
-
----
+- Rejected because: Requires complex state sharing between instances, harder to coordinate recovery
 
 ## System Constraints
 
 ### Hard Limits
 
-| Constraint | Value | Reason |
-|-----------|-------|--------|
-| Max Instances | 5 | Hardcoded `MAX_INSTANCES` |
-| Instance Ports | 3001-3005 | Hardcoded `BASE_PORT + id` |
-| Master Port | 3000 | Hardcoded in `master-server.ts` |
-| Simulation Duration | 60s | Default `maxTime` parameter |
-| Physics Timestep | 16.67ms | 60 FPS = 1000/60 ms |
-| Collision Radius | 2cm | Hardcoded in `PendulumSimulation` |
-| Min Collision Distance | 4cm | 2 × radius |
-
-### Performance Constraints
-
-- **Collision Detection Complexity:** O(n²) - scales poorly beyond 5 instances
-- **Network Latency:** 100ms polling interval adds delay
-- **Single-Threaded Physics:** Each instance limited by JavaScript event loop
-- **State Aggregation:** Master must wait for all HTTP responses
-
-### Configuration Constraints
-
-- **Angle Range:** -π to π radians (UI enforced)
-- **Length Range:** 10-70 cm (UI enforced)
-- **Mass Range:** 0.1-5.0 kg (UI enforced)
-- **Gravity Options:** Earth (9.81), Moon (1.62), Mars (3.71) m/s² (UI enforced)
-
-### Deployment Constraints
-
-- **Single Machine:** All processes run on localhost
-- **Port Availability:** Requires ports 3000-3005 free
-- **No Persistence:** State lost on restart
-- **No Authentication:** Open API (assumes trusted network)
-
----
+| Constraint             | Value     | Reason                            |
+| ---------------------- | --------- | --------------------------------- |
+| Max Instances          | 5         | Hardcoded `MAX_INSTANCES`         |
+| Instance Ports         | 3001-3005 | Hardcoded `BASE_PORT + id`        |
+| Master Port            | 3000      | Hardcoded in `master-server.ts`   |
+| Simulation Duration    | 60s       | Default `maxTime` parameter       |
+| Physics Timestep       | 16.67ms   | 60 FPS = 1000/60 ms               |
+| Collision Radius       | 2cm       | Hardcoded in `PendulumSimulation` |
+| Min Collision Distance | 4cm       | 2 × radius                        |
 
 ## Development Guide
 
 ### Prerequisites
 
-- Node.js 20+
-- npm or yarn
-- TypeScript knowledge
-- Basic understanding of child processes
-
-### Installation
-
-```bash
-cd server
-npm install
-```
-
-### Development Scripts
-
-```bash
-# Start master server with auto-reload
-npm run dev
-
-# Start single instance for debugging
-npm run dev:instance
-
-# Build TypeScript to dist/
-npm run build
-
-# Run compiled code
-npm start
-
-# Lint code
-npm run lint
-npm run lint:fix
-
-# Format code
-npm run format
-
-# Run tests
-npm test
-npm run test:watch
-```
-
-### Environment Variables
-
-```bash
-# Override default ports
-PORT=3000           # Master port
-BASE_PORT=3001      # First instance port
-
-# Override max instances
-MAX_INSTANCES=5
-```
-
-### Debugging Tips
-
-**1. Check Process Status:**
-```bash
-lsof -ti:3000-3005  # See which ports are in use
-ps aux | grep tsx   # See running instances
-```
-
-**2. Test Individual Instance:**
-```bash
-npm run dev:instance  # Starts single instance on 3001
-curl http://localhost:3001/health
-```
-
-**3. Monitor Logs:**
-```bash
-# Master logs all instance stdout/stderr with prefixes:
-# [Instance 0:3001] Message from instance 0
-# [Instance 1:3002] Message from instance 1
-```
-
-**4. Test Collision Detection:**
-```bash
-# Configure two pendulums close together
-curl -X POST http://localhost:3000/configure/0 \
-  -H "Content-Type: application/json" \
-  -d '{"pivotX": 10, "angle": 0.5, "length": 50, "mass": 1, "gravity": 9.81}'
-
-curl -X POST http://localhost:3000/configure/1 \
-  -H "Content-Type: application/json" \
-  -d '{"pivotX": 15, "angle": -0.5, "length": 50, "mass": 1, "gravity": 9.81}'
-
-# Start simulation
-curl -X POST http://localhost:3000/control \
-  -H "Content-Type: application/json" \
-  -d '{"action": "start"}'
-
-# Poll state and watch for collision logs
-curl http://localhost:3000/state
-```
-
-### Common Issues
-
-**Issue:** Port already in use
-```
-Error: listen EADDRINUSE :::3001
-```
-**Solution:** Kill orphaned process or change port
-```bash
-lsof -ti:3001 | xargs kill -9
-```
-
-**Issue:** Instance exits immediately
-```
-[Instance 0:3001] Process exited with code 0
-```
-**Solution:** Check for TypeScript errors or missing dependencies
-
-**Issue:** Collision not detected
-```
-collisionDetected: false (expected true)
-```
-**Solution:**
-- Verify `length` is included in `/state` response
-- Check collision radius (2cm per bob = 4cm total)
-- Ensure pendulums are actually close enough
-
----
-
-## Future Enhancements
-
-### Planned Features
-
-1. **WebSocket Support**
-   - Real-time push updates instead of polling
-   - Lower latency, reduced HTTP overhead
-
-2. **Distributed Collision Detection**
-   - Quad-tree spatial partitioning
-   - GPU-accelerated calculations
-
-3. **Physics Model Extensions**
-   - Damping coefficient (energy dissipation)
-   - Air resistance (velocity-dependent)
-   - Elastic collisions with momentum transfer
-   - Double pendulum support
-
-4. **Persistence Layer**
-   - Database integration (MongoDB/PostgreSQL)
-   - Save/load simulation configurations
-   - Historical data export
-
-5. **Monitoring & Metrics**
-   - Prometheus metrics endpoint
-   - Performance profiling
-   - Real-time dashboard
-
-6. **Scalability**
-   - Increase MAX_INSTANCES beyond 5
-   - Load balancing across multiple machines
-   - Container orchestration (Docker/Kubernetes)
-
-7. **Testing**
-   - Integration tests for API endpoints
-   - Load testing for collision detection
-   - Physics validation tests
-
-8. **Authentication & Security**
-   - JWT-based authentication
-   - Rate limiting
-   - Input validation & sanitization
+- **Node.js:** 20+ (LTS recommended)
+- **npm or yarn:** Package manager
+- **MQTT Broker:** Mosquitto, EMQX, or any MQTT v3.1.1 compatible broker
+- **TypeScript knowledge:** Familiarity with TypeScript syntax
+- **Understanding of:**
+  - Node.js child processes
+  - MQTT pub/sub messaging
+  - REST API design
+  - Basic physics (pendulum motion)
 
 ---
 
