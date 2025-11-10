@@ -13,7 +13,14 @@ A project with a server and UI component.
 
 - Node.js (v16 or higher recommended)
 - npm or yarn
+
 - Use on your machine locally `Mosquito` for MQTT broker.
+
+```bash
+# macOS (via Homebrew)
+brew install mosquitto
+brew services start mosquitto
+```
 
 ### Server
 
