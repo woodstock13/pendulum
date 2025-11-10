@@ -30,7 +30,7 @@ npm install
 npm start
 ```
 
-> More in Documentation-server.md
+> More in [Documentation-server.md](https://github.com/woodstock13/pendulum/blob/main/server/DOCUMENTATION.md)
 
 ### UI
 
@@ -40,7 +40,7 @@ npm install
 npm run dev
 ```
 
-> More in Documentation-ui.md
+> More in [Documentation-ui.md](https://github.com/woodstock13/pendulum/blob/main/ui/README.md)
 
 ## License
 
