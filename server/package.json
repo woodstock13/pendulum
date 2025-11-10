@@ -21,7 +21,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "mqtt": "^5.14.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.5",

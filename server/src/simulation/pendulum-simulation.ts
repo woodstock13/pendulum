@@ -28,7 +28,6 @@ export class PendulumSimulation {
   private state: SimulationState;
   private dt: number = 0.016; // 60 FPS
   private maxTime: number;
-  private readonly COLLISION_RADIUS: number = 2; // Hardcoded collision radius (cm)
 
   constructor(config: PendulumConfig, maxTime: number = 60) {
     this.config = config;
@@ -44,7 +43,7 @@ export class PendulumSimulation {
   /**
    * Calculate bob position in 2D space
    */
-  private calculatePosition(angle: number): Position2D {
+  public calculatePosition(angle: number): Position2D {
     const { pivotX, length } = this.config;
     return {
       x: pivotX + length * Math.sin(angle),
@@ -104,38 +103,5 @@ export class PendulumSimulation {
       time: 0,
       position: this.calculatePosition(this.config.angle),
     };
-  }
-
-  public getProgress(): number {
-    return Math.min(1, this.state.time / this.maxTime);
-  }
-
-  /**
-   * Check collision with another pendulum
-   */
-  public checkCollisionWith(other: PendulumSimulation): boolean {
-    const posA = this.state.position;
-    const posB = other.state.position;
-
-    const dx = posA.x - posB.x;
-    const dy = posA.y - posB.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-
-    const minDistance = this.COLLISION_RADIUS + other.COLLISION_RADIUS;
-
-    return distance < minDistance;
-  }
-
-  /**
-   * Get distance to another pendulum
-   */
-  public getDistanceTo(other: PendulumSimulation): number {
-    const posA = this.state.position;
-    const posB = other.state.position;
-
-    const dx = posA.x - posB.x;
-    const dy = posA.y - posB.y;
-
-    return Math.sqrt(dx * dx + dy * dy);
   }
 }
