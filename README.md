@@ -9,6 +9,12 @@ A project with a server and UI component.
 
 ## Getting Started
 
+### Prerequisites
+
+- Node.js (v16 or higher recommended)
+- npm or yarn
+- Use on your machine locally `Mosquito` for MQTT broker.
+
 ### Server
 
 ```bash
@@ -17,6 +23,7 @@ npm install
 npm start
 ```
 
+> More in Documentation-server.md
 
 ### UI
 
@@ -25,6 +32,8 @@ cd ui
 npm install
 npm run dev
 ```
+
+> More in Documentation-ui.md
 
 ## License
 
